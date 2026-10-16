@@ -1,1 +1,23 @@
-{"name":"keyboard-sync","version":"1.0.0","description":"Live PC-mobile keyboard sync via WebSocket","main":"server.js","scripts":{"start":"node server.js"},"dependencies":{"express":"^4.19.2","ws":"^8.18.0","crypto-js":"^4.4.1"}}
+{
+  "name": "keyboard-sync",
+  "version": "1.0.0",
+  "description": "Live PC-mobile keyboard sync via WebSocket - Phase 1 Foundation",
+  "main": "server/src/server.ts",
+  "scripts": {
+    "start": "concurrently \"cd server && npm start\" \"cd mobile && npm start\" \"cd desktop && npm start\"",
+    "server": "cd server && npm start",
+    "mobile": "cd mobile && npm start",
+    "desktop": "cd desktop && npm start",
+    "build": "npm run build:server && npm run build:shared",
+    "build:server": "cd server && tsc",
+    "build:shared": "cd shared && npm run build"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  },
+  "author": "",
+  "license": "ISC"
+}

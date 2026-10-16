@@ -1,0 +1,76 @@
+/* desktop/src/renderer/index.html */
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keyboard Sync Desktop Client</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="card">
+    <h1 class="title">Keyboard Sync - Desktop Client</h1>
+    
+    <div class="status-bar">
+      <div class="status-indicator status-connected">🟢 Connected</div>
+      <div class="pairing-info">Pairing Code: [pairing-code]</div>
+      <div class="pairing-info">Role: PC | Status: Active</div>
+    </div>
+
+    <div class="keyboard-toggle">
+      <label style="display: block; margin-bottom: 10px; font-size: 18px;">Remote Keyboard Control</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="keyboardToggle" checked>
+        <span class="slider"></span>
+      </label>
+      <span style="margin-left: 10px; font-size: 14px;">(enabled = incoming keystrokes will be typed)</span>
+    </div>
+
+    <div class="clipboard-section">
+      <h3>Clipboard Data</h3>
+      <div class="clipboard-display" id="clipboardDisplay">
+        No clipboard data available
+      </div>
+      <button class="refresh-button" onclick="refreshClipboard()">Refresh Clipboard</button>
+    </div>
+  </div>
+
+  <script>
+    let pairingCode = '[pairing-code]';
+    
+    // Request initial clipboard data
+    async function refreshClipboard() {
+      try {
+        const response = await window.electron.ipcRenderer.invoke('api-request', {
+          action: 'get-clipboard',
+          data: { pairingCode }
+        });
+        
+        if (response.success) {
+          document.getElementById('clipboardDisplay').textContent = response.data || 'No data';
+        }
+      } catch (error) {
+        console.error('Failed to refresh clipboard:', error);
+      }
+    }
+    
+    // Toggle keyboard control
+    document.getElementById('keyboardToggle').addEventListener('change', async (e) => {
+      const enabled = e.target.checked;
+      try {
+        await window.electron.ipcRenderer.invoke('api-request', {
+          action: 'toggle-keyboard',
+          data: { pairingCode, enabled }
+        });
+      } catch (error) {
+        console.error('Failed to toggle keyboard:', error);
+        // Revert toggle on error
+        e.target.checked = !enabled;
+      }
+    });
+    
+    // Initial load
+    refreshClipboard();
+  </script>
+</body>
+</html>
