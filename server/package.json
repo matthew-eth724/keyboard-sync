@@ -1,7 +1,7 @@
+// package.json (server)
 {
   "name": "keyboard-sync-server",
   "version": "1.0.0",
-  "description": "WebSocket server for keyboard and clipboard sync",
   "main": "src/server.ts",
   "scripts": {
     "start": "ts-node src/server.ts",
@@ -9,17 +9,18 @@
     "test": "jest"
   },
   "dependencies": {
-    "crypto": "^1.0.1",
-    "dotenv": "^16.3.1",
     "express": "^4.19.2",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.3.1"
   },
   "devDependencies": {
-    "@types/express": "^4.17.25",
-    "@types/node": "^20.19.43",
-    "@types/ws": "^8.18.2",
-    "jest": "^29.7.0",
+    "typescript": "^5.3.3",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "jest": "^29.7.0",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.6",
+    "@types/ws": "^8.5.10",
+    "supertest": "^6.3.0"
   }
 }
