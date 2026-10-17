@@ -2,6 +2,12 @@
 import { WebSocket } from 'ws';
 import { EncryptionService } from './encryption';
 
+declare module 'ws' {
+  interface WebSocket {
+    pairingCode?: string;
+  }
+}
+
 export interface WebSocketMessage {
   type: string;
   data?: any;
@@ -28,6 +34,8 @@ export class WebSocketManager {
   }
 
   createRoom(pairingCode: string): PairRoom {
+    const existing = this.getRoom(pairingCode);
+    if (existing) return existing;
     const room: PairRoom = {
       pairingCode,
       pcSocket: null,

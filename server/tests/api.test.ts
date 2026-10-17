@@ -35,8 +35,8 @@ describe('API Server', () => {
         .get(`/api/pairing/${pairingCode}`)
         .expect(200);
 
-      expect(response.body).toHaveProperty('status');
-      expect(response.body.status.pairingCode).toBe(pairingCode);
+      expect(response.body).toHaveProperty('pairingCode');
+      expect(response.body.pairingCode).toBe(pairingCode);
     });
 
     it('should return 404 for non-existent pairing code', async () => {
