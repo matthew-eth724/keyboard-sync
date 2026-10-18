@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""
+server/main.py - Main aiohttp server for ClipSync
+Handles WebSocket connections and routes for the phone client
+
+This is the foundation for M3: Encrypted transport implementation
+"""
+
+import asyncio
+import json
+import logging
+import ssl
+import asyncio
+from aiohttp import web, WSMsgType, web_protocol
+from aiohttp.web_protocol import WebProtocol
+from aiohttp import ClientSession, ClientTimeout
+
+from server.crypto import (
+    generate_keypair, perform_handshake, seal_message, open_message,
+    blake2b_hash, create_sealed_box, derive_shared_secret
+)
+from server.pairing import get_paired_devices, add_paired_device, remove_paired_device
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Constants for M3 implementation
+SESSION_TIMEOUT = 300  # 5 minutes
+MAX_RECONNECT_ATTEMPTS = 3
+RECONNECT_DELAY_BASE = 1.0
+
+# Global state for M3 - enhanced session management
+sessions = {}
+connection_states = {}
+
+
+
+async def init_crypto_for_device(device_id):
+    """
+    Initialize crypto state for a paired device.
+    
+    Args:
+        device_id: ID of the paired device
+        
+    Returns:
+        Tuple of (device_key, session_keys_dict)
+    """
+    # Get device key from pairing
+    device_key = paired_devices[device_id].get('device_key')
+    if not device_key:
+        raise ValueError(f"Device {device_id} not properly paired")
+    
+    # Initialize session keys for new connections
+    session_keys = {
+        'send': None,  # Will be set per connection
+        'recv': None,  # Will be set per connection
+        'send_counter': 0,
+        'recv_counter': 0
+    }
+    
+    return device_key, session_keys
+
+
+async def establish_session_reconnect(device_key, peer_pub_key, device_id):
+    """
+    Establish a new encrypted session with reconnection support.
+    
+    Args:
+        device_key: Device's long-term key
+        peer_pub_key: Our public key for the session
+        device_id: ID of the device
+        
+    Returns:
+        Tuple of (send_box, recv_box, session_id)
+    """
+    # Generate ephemeral keypair for forward secrecy
+    our_priv, our_pub = generate_keypair()
+    
+    # Derive session key using device key + Diffie-Hellman
+    shared_secret = derive_shared_secret(our_priv, device_key)
+    session_key = blake2b_hash(shared_secret + device_key)
+    
+    # Create encryption boxes for send/recv
+    send_box = create_sealed_box(session_key)
+    recv_box = create_sealed_box(session_key, send_box.nonce)
+    
+    session_id = f"{device_id}-{asyncio.get_event_loop().time()}"
+    
+    # Store session with timeout
+    sessions[session_id] = {
+        'send_box': send_box,
+        'recv_box': recv_box,
+        'device_id': device_id,
+        'device_key': device_key,
+        'created_at': asyncio.get_event_loop().time(),
+        'last_used': asyncio.get_event_loop().time(),
+        'active': True
+    }
+    
+    return send_box, recv_box, session_id
+
+
+async def handle_websocket(request):
+    """
+    Handle WebSocket connections from phone clients.
+    
+    Args:
+        request: aiohttp request object
+        
+    Returns:
+        WebSocket response
+    """
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    
+    device_id = None
+    session_data = None
+    
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                data = json.loads(msg.data)
+                msg_type = data.get('type')
+                
+                if msg_type == 'hello':
+                    # Initial connection handshake
+                    device_id = data.get('device_id')
+                    logger.info(f"Phone device connected: {device_id}")
+                    
+                    # Check if device is paired
+                    if device_id not in paired_devices:
+                        await ws.send_str(json.dumps({
+                            'type': 'error',
+                            'message': 'Device not paired'
+                        }))
+                        break
+                    
+                    # Initialize crypto for device
+                    device_key, session_keys = await init_crypto_for_device(device_id)
+                    session_data = {
+                        'device_key': device_key,
+                        'session_keys': session_keys,
+                        'device_id': device_id
+                    }
+                    
+                    await ws.send_str(json.dumps({
+                        'type': 'ready',
+                        'message': 'Crypto initialized'
+                    }))
+                    
+                elif msg_type == 'encrypt':
+                    # Encrypt message from phone to PC
+                    if not session_data:
+                        await ws.send_str(json.dumps({
+                            'type': 'error',
+                            'message': 'Session not initialized'
+                        }))
+                        continue
+                    
+                    payload = data.get('payload')
+                    encrypted = seal_message(session_data['send_box'], {
+                        'type': 'phone_to_pc',
+                        'payload': payload,
+                        'device': device_id,
+                        'ts': int(asyncio.get_event_loop().time() * 1000)
+                    })
+                    
+                    # Relay to all paired PCs (simplified)
+                    await relay_encrypted_message(encrypted, device_id)
+                    
+                    await ws.send_str(json.dumps({
+                        'type': 'ack',
+                        'message': 'Message encrypted and relayed'
+                    }))
+                    
+                elif msg_type == 'decrypt':
+                    # Decrypt message from phone to PC
+                    if not session_data:
+                        await ws.send_str(json.dumps({
+                            'type': 'error',
+                            'message': 'Session not initialized'
+                        }))
+                        continue
+                    
+                    encrypted_data = data.get('encrypted')
+                    decrypted = open_message(session_data['recv_box'], encrypted_data)
+                    
+                    await ws.send_str(json.dumps({
+                        'type': 'decrypted',
+                        'message': decrypted
+                    }))
+                    
+                elif msg_type == 'ping':
+                    # Keep-alive message
+                    await ws.send_str(json.dumps({
+                        'type': 'pong',
+                        'timestamp': int(asyncio.get_event_loop().time() * 1000)
+                    }))
+                    
+            elif msg.type == WSMsgType.ERROR:
+                logger.error(f"WebSocket error: {ws.exception()}")
+                break
+                
+    finally:
+        logger.info(f"Phone device disconnected: {device_id}")
+        if device_id and device_id in active_connections:
+            del active_connections[device_id]
+    
+    return ws
+
+
+async def relay_encrypted_message(encrypted_data, source_device):
+    """
+    Relay encrypted message from phone to all paired PCs.
+    
+    Args:
+        encrypted_data: Encrypted message from phone
+        source_device: ID of the device that sent the message
+    """
+    # In a real implementation, this would send to all PCs
+    # For now, just log
+    logger.info(f"Relaying message from {source_device} to all PCs")
+    
+    # Also broadcast to phone clients (simplified)
+    for device_id, conn in active_connections.items():
+        if device_id != source_device:
+            try:
+                await conn.send_str(json.dumps({
+                    'type': 'broadcast',
+                    'encrypted': encrypted_data,
+                    'from': source_device
+                }))
+            except Exception as e:
+                logger.error(f"Failed to send broadcast to {device_id}: {e}")
+
+
+async def setup_routes(app):
+    """Setup application routes"""
+    app.router.add_get('/ws', handle_websocket)
+    app.router.add_get('/', serve_homepage)
+    app.router.add_get('/health', health_check)
+
+
+async def serve_homepage(request):
+    """Serve the phone UI homepage"""
+    html_content = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ClipSync - Phone Pairing</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .connected { background-color: #d4edda; color: #155724; }
+        .disconnected { background-color: #f8d7da; color: #721c24; }
+        button { padding: 10px 20px; margin: 10px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        input[type="text"] { padding: 10px; margin: 10px; border: 1px solid #ddd; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔗 ClipSync - Phone Pairing</h1>
+        <div id="status" class="status disconnected">
+            Not connected
+        </div>
+        
+        <div id="pairing-section">
+            <h2>Pair with PC</h2>
+            <p>Scan the QR code on your PC or enter the pairing code:</p>
+            
+            <div id="qr-display">
+                <h3>QR Code</h3>
+                <img id="qr-image" src="/api/qr" alt="Pairing QR Code">
+            </div>
+            
+            <div id="code-display" style="display:none;">
+                <h3>Pairing Code</h3>
+                <input type="text" id="pairing-code" readonly>
+                <button onclick="enterCodeManually()">Enter Code Manually</button>
+            </div>
+        </div>
+        
+        <div id="clipboard-section" style="display:none;">
+            <h2>Clipboard Sync</h2>
+            <div id="incoming-text"></div>
+            <button onclick="sendToClipboard()">Send Text to PC</button>
+            <input type="text" id="text-to-send" placeholder="Type text to send...">
+        </div>
+    </div>
+    
+    <script>
+        let ws = null;
+        let deviceId = null;
+        
+        // Connect to WebSocket
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.hostname}:8000/ws`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = function(event) {
+                updateStatus('Connected to server', true);
+                requestPairingInfo();
+            };
+            
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                handleMessage(data);
+            };
+            
+            ws.onclose = function(event) {
+                updateStatus('Disconnected from server', false);
+                // Attempt to reconnect
+                setTimeout(connectWebSocket, 3000);
+            };
+            
+            ws.onerror = function(error) {
+                updateStatus('Connection error', false);
+            };
+        }
+        
+        function updateStatus(message, isConnected) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${isConnected ? 'connected' : 'disconnected'}`;
+        }
+        
+        function handleMessage(data) {
+            switch(data.type) {
+                case 'pairing_info':
+                    displayPairingInfo(data);
+                    break;
+                case 'connected':
+                    deviceId = data.device_id;
+                    updateStatus('Connected and paired!', true);
+                    showClipboardSection();
+                    break;
+                case 'decrypted':
+                    document.getElementById('incoming-text').textContent = data.message.payload;
+                    break;
+                case 'broadcast':
+                    // Handle incoming messages from other devices
+                    break;
+            }
+        }
+        
+        function requestPairingInfo() {
+            ws.send(JSON.stringify({ type: 'hello', device_id: 'phone-' + Math.random().toString(36).substr(2, 9) }));
+        }
+        
+        function displayPairingInfo(data) {
+            if (data.qr_code) {
+                document.getElementById('qr-image').src = data.qr_code;
+            }
+            if (data.code) {
+                document.getElementById('pairing-code').value = data.code;
+                document.getElementById('code-display').style.display = 'block';
+            }
+        }
+        
+        function showClipboardSection() {
+            document.getElementById('clipboard-section').style.display = 'block';
+        }
+        
+        function sendToClipboard() {
+            const text = document.getElementById('text-to-send').value;
+            if (text) {
+                ws.send(JSON.stringify({
+                    type: 'encrypt',
+                    payload: text
+                }));
+                document.getElementById('text-to-send').value = '';
+            }
+        }
+        
+        function enterCodeManually() {
+            const code = prompt('Enter the 6-character pairing code:');
+            if (code) {
+                ws.send(JSON.stringify({
+                    type: 'code_input',
+                    code: code
+                }));
+            }
+        }
+        
+        // Initialize connection
+        connectWebSocket();
+    </script>
+</body>
+</html>
+"""
+    return web.Response(text=html_content, content_type='text/html')
+
+
+async def health_check(request):
+    """Health check endpoint"""
+    return web.json_response({
+        'status': 'healthy',
+        'active_connections': len(active_connections),
+        'paired_devices': len(paired_devices)
+    })
+
+
+async def init_app():
+    """Initialize the application"""
+    app = web.Application()
+    await setup_routes(app)
+    
+    # Initialize with some test data
+    logger.info("Initializing ClipSync server...")
+    
+    return app
+
+
+if __name__ == '__main__':
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='ClipSync Server')
+    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
+    parser.add_argument('--port', type=int, default=8000, help='Port to listen on')
+    
+    args = parser.parse_args()
+    
+    # Initialize and run server
+    app = web.Application()
+    web.run_app(app, host=args.host, port=args.port)
+
+
+# Keep backward compatibility
+app = None  # Will be initialized when needed

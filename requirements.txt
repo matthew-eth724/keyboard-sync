@@ -1,0 +1,16 @@
+# ClipSync dependencies
+
+# Core cryptography and networking
+aiohttp>=3.9.0
+pyperclip>=1.9.0
+PyNaCl>=1.5.0  # libsodium bindings
+qrcode[pil]>=7.4.0  # QR code generation
+spake2  # Password-authenticated key exchange
+
+# Development dependencies
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+Werkzeug>=3.0.0  # For serving static files and QR codes
+
+# Optional for development
+matplotlib>=3.5.0  # For debugging visualizations

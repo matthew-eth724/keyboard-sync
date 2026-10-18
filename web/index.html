@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClipSync - Encrypted Clipboard Sync</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 500px;
+            width: 90%;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .logo {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+        
+        .tagline {
+            color: #666;
+            font-size: 16px;
+            margin-bottom: 20px;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 500;
+        }
+        
+        .status.disconnected {
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+        }
+        
+        .status.connected {
+            background: #e8f5e8;
+            color: #2e7d32;
+            border: 1px solid #c8e6c9;
+        }
+        
+        .status.pairing {
+            background: #fff3e0;
+            color: #ef6c00;
+            border: 1px solid #ffe0b2;
+        }
+        
+        .section {
+            margin-bottom: 25px;
+        }
+        
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .qr-container {
+            text-align: center;
+            padding: 20px;
+            border: 2px dashed #ddd;
+            border-radius: 10px;
+            background: #fafafa;
+        }
+        
+        #qr-image {
+            max-width: 200px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+            background: white;
+        }
+        
+        .code-display {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 14px;
+            word-break: break-all;
+            margin: 10px 0;
+        }
+        
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin: 15px 0;
+        }
+        
+        input {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+        
+        button {
+            padding: 12px 24px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        
+        button:hover {
+            background: #45a049;
+        }
+        
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        button.secondary {
+            background: #2196F3;
+        }
+        
+        button.secondary:hover {
+            background: #1976d2;
+        }
+        
+        button.danger {
+            background: #f44336;
+        }
+        
+        button.danger:hover {
+            background: #d32f2f;
+        }
+        
+        .clipboard-area {
+            background: #f9f9f9;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            min-height: 100px;
+            margin: 15px 0;
+            position: relative;
+        }
+        
+        .clipboard-text {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        .empty-state {
+            color: #999;
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .connection-info {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            font-size: 14px;
+        }
+        
+        .connected-devices {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 10px 0;
+        }
+        
+        .device-badge {
+            background: #4CAF50;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .refresh-button {
+            background: #9E9E9E;
+            margin-left: 10px;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #4CAF50;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border: 1px solid #ffcdd2;
+        }
+        
+        .success {
+            background: #e8f5e8;
+            color: #2e7d32;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border: 1px solid #c8e6c9;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        .primary-button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        
+        .primary-button:hover {
+            background: #45a049;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+        }
+        
+        .primary-button:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        
+        @media (max-width: 480px) {
+            .container {
+                padding: 20px;
+                width: 95%;
+            }
+            
+            .logo {
+                font-size: 36px;
+            }
+            
+            input, button {
+                font-size: 14px;
+                padding: 10px 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">📋</div>
+            <h1>ClipSync</h1>
+            <div class="tagline">Encrypted Clipboard Sync</div>
+        </div>
+        
+        <div id="status" class="status disconnected">
+            Not connected
+        </div>
+        
+        <div id="connection-info" class="connection-info hidden">
+            <strong>Connected devices:</strong>
+            <div id="connected-devices" class="connected-devices">
+                <!-- Connected devices will be listed here -->
+            </div>
+        </div>
+        
+        <div id="pairing-section" class="section">
+            <div class="section-title">🔗 Pair New Device</div>
+            
+            <div class="qr-container">
+                <h3 style="margin-bottom: 15px;">Scan PC QR Code</h3>
+                <img id="qr-image" src="" alt="Pairing QR Code" onerror="this.src='data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"200\"><rect width=\"200\" height=\"200\" fill=\"#f0f0f0\"/><text x=\"100\" y=\"100\" font-family=\"Arial\" font-size=\"16\" text-anchor=\"middle\" dominant-baseline=\"middle\">QR Code\nLoading...</text></svg>'">
+                <p style="margin-top: 15px; color: #666; font-size: 14px;">
+                    Open this page on your PC and scan with your phone
+                </p>
+            </div>
+            
+            <div id="code-section" class="hidden">
+                <h3>Or enter pairing code manually:</h3>
+                <div class="input-group">
+                    <input type="text" id="pairing-code-input" placeholder="Enter 6-character code" maxlength="6" style="font-size: 18px; text-align: center; letter-spacing: 3px;">
+                    <button id="enter-code-btn" class="secondary">Enter Code</button>
+                </div>
+                <div id="code-status" class="hidden"></div>
+            </div>
+        </div>
+        
+        <div id="clipboard-section" class="section hidden">
+            <div class="section-title">📄 Clipboard Sync</div>
+            
+            <div class="clipboard-area" id="clipboard-display">
+                <div class="empty-state" id="empty-state">
+                    <div class="spinner"></div>
+                    <p>Waiting for clipboard content...</p>
+                </div>
+                <div class="clipboard-text hidden" id="clipboard-text">
+                    <!-- Clipboard content will appear here -->
+                </div>
+            </div>
+            
+            <div class="input-group">
+                <input type="text" id="text-to-send" placeholder="Type text to send to PC..." maxlength="1000">
+                <button id="send-btn" class="secondary">Send to PC</button>
+            </div>
+            
+            <div style="margin-top: 15px; font-size: 14px; color: #666;">
+                <strong>Device ID:</strong> <span id="device-id-display">-</span><br>
+                <strong>Status:</strong> <span id="connection-status">Connecting...</span>
+            </div>
+        </div>
+        
+        <div id="error-container" class="hidden"></div>
+        <div id="success-container" class="hidden"></div>
+    </div>
+    
+    <script src="crypto.js"></script>
+    <script>
+        // Global app state
+        const appState = {
+            ws: null,
+            deviceId: null,
+            pairingSecret: null,
+            qrCode: null,
+            connectionRetryCount: 0,
+            maxRetries: 5,
+            reconnectTimeout: null,
+            heartbeatInterval: null,
+            qrRefreshInterval: null
+        };
+        
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeApp();
+        });
+        
+        function initializeApp() {
+            // Start WebSocket connection
+            connectWebSocket();
+            
+            // Start QR code refresh
+            startQRCodeRefresh();
+            
+            // Add button event listeners
+            document.getElementById('enter-code-btn')?.addEventListener('click', enterCodeManually);
+            document.getElementById('send-btn')?.addEventListener('click', sendTextToPC);
+            document.getElementById('pairing-code-input')?.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') enterCodeManually();
+            });
+        }
+        
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.hostname}:8000/ws`;
+            
+            appState.ws = new WebSocket(wsUrl);
+            
+            appState.ws.onopen = handleWebSocketOpen;
+            appState.ws.onmessage = handleWebSocketMessage;
+            appState.ws.onclose = handleWebSocketClose;
+            appState.ws.onerror = handleWebSocketError;
+        }
+        
+        function handleWebSocketOpen() {
+            updateStatus('Connected to server', false);
+            appState.connectionRetryCount = 0;
+            
+            // Request pairing information
+            sendWebSocketMessage({
+                type: 'hello',
+                device_id: generateDeviceId()
+            });
+        }
+        
+        function handleWebSocketMessage(event) {
+            try {
+                const data = JSON.parse(event.data);
+                handleWebSocketData(data);
+            } catch (error) {
+                showError('Failed to parse server message: ' + error.message);
+            }
+        }
+        
+        function handleWebSocketData(data) {
+            switch (data.type) {
+                case 'ready':
+                    handleReadyMessage(data);
+                    break;
+                case 'pairing_info':
+                    handlePairingInfo(data);
+                    break;
+                case 'connected':
+                    handleConnectedMessage(data);
+                    break;
+                case 'decrypted':
+                    handleDecryptedMessage(data);
+                    break;
+                case 'broadcast':
+                    handleBroadcastMessage(data);
+                    break;
+                case 'pong':
+                    // Heartbeat response
+                    break;
+                case 'error':
+                    showError(data.message || 'Unknown error from server');
+                    break;
+                default:
+                    console.log('Unknown message type:', data.type);
+            }
+        }
+        
+        function handleReadyMessage(data) {
+            console.log('Server ready:', data);
+            // Server is ready, waiting for pairing
+        }
+        
+        function handlePairingInfo(data) {
+            if (data.qr_code) {
+                displayQRCode(data.qr_code);
+            }
+            if (data.code) {
+                showCodeInput(data.code);
+            }
+        }
+        
+        function handleConnectedMessage(data) {
+            appState.deviceId = data.device_id;
+            updateStatus('Connected and paired!', true);
+            
+            showClipboardSection();
+            updateConnectionInfo(data);
+            
+            // Start heartbeat
+            startHeartbeat();
+        }
+        
+        function handleDecryptedMessage(data) {
+            // Display decrypted message from PC
+            displayClipboardContent(data.message);
+        }
+        
+        function handleBroadcastMessage(data) {
+            // Handle broadcasts from other devices
+            console.log('Broadcast received:', data);
+        }
+        
+        function handleWebSocketClose(event) {
+            updateStatus('Disconnected from server', false);
+            hideClipboardSection();
+            
+            // Stop heartbeat
+            stopHeartbeat();
+            
+            // Attempt to reconnect
+            if (appState.connectionRetryCount < appState.maxRetries) {
+                appState.connectionRetryCount++;
+                const delay = Math.min(1000 * Math.pow(2, appState.connectionRetryCount - 1), 30000);
+                
+                showError(`Connection lost. Reconnecting in ${delay/1000} seconds...`);
+                
+                appState.reconnectTimeout = setTimeout(() => {
+                    connectWebSocket();
+                }, delay);
+            } else {
+                showError('Connection failed after multiple attempts. Please refresh the page.');
+            }
+        }
+        
+        function handleWebSocketError(error) {
+            console.error('WebSocket error:', error);
+            showError('Connection error occurred');
+        }
+        
+        function sendWebSocketMessage(message) {
+            if (appState.ws && appState.ws.readyState === WebSocket.OPEN) {
+                appState.ws.send(JSON.stringify(message));
+            } else {
+                console.warn('WebSocket is not open, cannot send message:', message);
+            }
+        }
+        
+        function generateDeviceId() {
+            return 'phone-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now().toString(36);
+        }
+        
+        function displayQRCode(qrData) {
+            const qrImage = document.getElementById('qr-image');
+            if (qrImage) {
+                qrImage.src = qrData;
+            }
+        }
+        
+        function showCodeInput(code) {
+            const codeSection = document.getElementById('code-section');
+            const codeInput = document.getElementById('pairing-code-input');
+            const codeStatus = document.getElementById('code-status');
+            
+            if (codeSection) codeSection.classList.remove('hidden');
+            if (codeInput) codeInput.value = code;
+            if (codeStatus) codeStatus.classList.add('hidden');
+        }
+        
+        function enterCodeManually() {
+            const codeInput = document.getElementById('pairing-code-input');
+            const code = codeInput ? codeInput.value.trim().toUpperCase() : '';
+            
+            if (!code || code.length !== 6) {
+                showError('Please enter a valid 6-character code');
+                return;
+            }
+            
+            hideError();n            updateStatus('Verifying pairing code...', false);
+            
+            sendWebSocketMessage({
+                type: 'code_input',
+                code: code
+            });
+        }
+        
+        function sendTextToPC() {
+            const textInput = document.getElementById('text-to-send');
+            const text = textInput ? textInput.value.trim() : '';
+            
+            if (!text) {
+                showError('Please enter text to send');
+                return;
+            }
+            
+            // Send encrypted message to PC
+            sendWebSocketMessage({
+                type: 'encrypt',
+                payload: text
+            });
+            
+            // Add to local display immediately
+            displayClipboardContent({
+                type: 'text',
+                payload: text,
+                device_id: appState.deviceId,
+                source: 'phone'
+            });
+            
+            // Clear input
+            if (textInput) textInput.value = '';
+            
+            showSuccess('Text sent to PC');
+        }
+        
+        function displayClipboardContent(message) {
+            const clipboardText = document.getElementById('clipboard-text');
+            const emptyState = document.getElementById('empty-state');
+            
+            if (clipboardText && emptyState) {
+                clipboardText.textContent = message.payload;
+                clipboardText.classList.remove('hidden');
+                emptyState.classList.add('hidden');
+            }
+        }
+        
+        function updateConnectionInfo(data) {
+            const deviceIdDisplay = document.getElementById('device-id-display');
+            const connectionStatus = document.getElementById('connection-status');
+            
+            if (deviceIdDisplay) deviceIdDisplay.textContent = data.device_id || 'N/A';
+            if (connectionStatus) connectionStatus.textContent = data.status || 'Connected';
+            
+            const connectionInfo = document.getElementById('connection-info');
+            if (connectionInfo) connectionInfo.classList.remove('hidden');
+        }
+        
+        function startHeartbeat() {
+            // Send ping every 30 seconds
+            appState.heartbeatInterval = setInterval(() => {
+                sendWebSocketMessage({
+                    type: 'ping',
+                    timestamp: Date.now()
+                });
+            }, 30000);
+        }
+        
+        function stopHeartbeat() {
+            if (appState.heartbeatInterval) {
+                clearInterval(appState.heartbeatInterval);
+                appState.heartbeatInterval = null;
+            }
+        }
+        
+        function startQRCodeRefresh() {
+            // Refresh QR code every minute
+            appState.qrRefreshInterval = setInterval(() => {
+                sendWebSocketMessage({
+                    type: 'qr_request'
+                });
+            }, 60000);
+        }
+        
+        function updateStatus(message, isConnected) {
+            const statusEl = document.getElementById('status');
+            if (!statusEl) return;
+            
+            statusEl.textContent = message;
+            statusEl.className = `status ${isConnected ? 'connected' : 'pairing'}`;
+        }
+        
+        function showClipboardSection() {
+            const clipboardSection = document.getElementById('clipboard-section');
+            const pairingSection = document.getElementById('pairing-section');
+            const connectionInfo = document.getElementById('connection-info');
+            
+            if (clipboardSection) clipboardSection.classList.remove('hidden');
+            if (pairingSection) pairingSection.classList.add('hidden');
+            if (connectionInfo) connectionInfo.classList.remove('hidden');
+        }
+        
+        function hideClipboardSection() {
+            const clipboardSection = document.getElementById('clipboard-section');
+            const pairingSection = document.getElementById('pairing-section');
+            const connectionInfo = document.getElementById('connection-info');
+            
+            if (clipboardSection) clipboardSection.classList.add('hidden');
+            if (pairingSection) pairingSection.classList.remove('hidden');
+            if (connectionInfo) connectionInfo.classList.add('hidden');
+        }
+        
+        function showError(message) {
+            hideSuccess();
+            
+            let errorContainer = document.getElementById('error-container');
+            if (!errorContainer) {
+                errorContainer = document.createElement('div');
+                errorContainer.id = 'error-container';
+                document.querySelector('.container').insertBefore(errorContainer, document.querySelector('.section'));
+            }
+            
+            errorContainer.innerHTML = `<div class="error">❌ ${message}</div>`;
+            errorContainer.classList.remove('hidden');
+            
+            // Auto-hide after 10 seconds
+            setTimeout(() => {
+                hideError();
+            }, 10000);
+        }
+        
+        function hideError() {
+            const errorContainer = document.getElementById('error-container');
+            if (errorContainer) {
+                errorContainer.classList.add('hidden');
+            }
+        }
+        
+        function showSuccess(message) {
+            hideError();
+            
+            let successContainer = document.getElementById('success-container');
+            if (!successContainer) {
+                successContainer = document.createElement('div');
+                successContainer.id = 'success-container';
+                document.querySelector('.container').insertBefore(successContainer, document.querySelector('.section'));
+            }
+            
+            successContainer.innerHTML = `<div class="success">✅ ${message}</div>`;
+            successContainer.classList.remove('hidden');
+            
+            // Auto-hide after 5 seconds
+            setTimeout(() => {
+                hideSuccess();
+            }, 5000);
+        }
+        
+        function hideSuccess() {
+            const successContainer = document.getElementById('success-container');
+            if (successContainer) {
+                successContainer.classList.add('hidden');
+            }
+        }
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            stopHeartbeat();
+            if (appState.qrRefreshInterval) {
+                clearInterval(appState.qrRefreshInterval);
+            }
+            if (appState.reconnectTimeout) {
+                clearTimeout(appState.reconnectTimeout);
+            }
+            
+            if (appState.ws) {
+                appState.ws.close();
+            }
+        });
+    </script>
+</body>
+</html>
