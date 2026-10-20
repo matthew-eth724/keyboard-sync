@@ -82,22 +82,6 @@
             color: #333;
         }
         
-        .qr-container {
-            text-align: center;
-            padding: 20px;
-            border: 2px dashed #ddd;
-            border-radius: 10px;
-            background: #fafafa;
-        }
-        
-        #qr-image {
-            max-width: 200px;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 15px;
-            background: white;
-        }
-        
         .code-display {
             background: #f5f5f5;
             padding: 15px;
@@ -310,17 +294,9 @@
         
         <div id="pairing-section" class="section">
             <div class="section-title">🔗 Pair New Device</div>
-            
-            <div class="qr-container">
-                <h3 style="margin-bottom: 15px;">Scan PC QR Code</h3>
-                <img id="qr-image" src="" alt="Pairing QR Code" onerror="this.src='data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"200\"><rect width=\"200\" height=\"200\" fill=\"#f0f0f0\"/><text x=\"100\" y=\"100\" font-family=\"Arial\" font-size=\"16\" text-anchor=\"middle\" dominant-baseline=\"middle\">QR Code\nLoading...</text></svg>'">
-                <p style="margin-top: 15px; color: #666; font-size: 14px;">
-                    Open this page on your PC and scan with your phone
-                </p>
-            </div>
-            
-            <div id="code-section" class="hidden">
-                <h3>Or enter pairing code manually:</h3>
+
+            <div id="code-section">
+                <h3>Enter pairing code:</h3>
                 <div class="input-group">
                     <input type="text" id="pairing-code-input" placeholder="Enter 6-character code" maxlength="6" style="font-size: 18px; text-align: center; letter-spacing: 3px;">
                     <button id="enter-code-btn" class="secondary">Enter Code</button>
@@ -364,12 +340,10 @@
             ws: null,
             deviceId: null,
             pairingSecret: null,
-            qrCode: null,
             connectionRetryCount: 0,
             maxRetries: 5,
             reconnectTimeout: null,
-            heartbeatInterval: null,
-            qrRefreshInterval: null
+            heartbeatInterval: null
         };
         
         // Initialize the application
@@ -380,9 +354,6 @@
         function initializeApp() {
             // Start WebSocket connection
             connectWebSocket();
-            
-            // Start QR code refresh
-            startQRCodeRefresh();
             
             // Add button event listeners
             document.getElementById('enter-code-btn')?.addEventListener('click', enterCodeManually);
@@ -458,9 +429,6 @@
         }
         
         function handlePairingInfo(data) {
-            if (data.qr_code) {
-                displayQRCode(data.qr_code);
-            }
             if (data.code) {
                 showCodeInput(data.code);
             }
@@ -526,13 +494,6 @@
             return 'phone-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now().toString(36);
         }
         
-        function displayQRCode(qrData) {
-            const qrImage = document.getElementById('qr-image');
-            if (qrImage) {
-                qrImage.src = qrData;
-            }
-        }
-        
         function showCodeInput(code) {
             const codeSection = document.getElementById('code-section');
             const codeInput = document.getElementById('pairing-code-input');
@@ -552,7 +513,8 @@
                 return;
             }
             
-            hideError();n            updateStatus('Verifying pairing code...', false);
+            hideError();
+            updateStatus('Verifying pairing code...', false);
             
             sendWebSocketMessage({
                 type: 'code_input',
@@ -626,15 +588,6 @@
                 clearInterval(appState.heartbeatInterval);
                 appState.heartbeatInterval = null;
             }
-        }
-        
-        function startQRCodeRefresh() {
-            // Refresh QR code every minute
-            appState.qrRefreshInterval = setInterval(() => {
-                sendWebSocketMessage({
-                    type: 'qr_request'
-                });
-            }, 60000);
         }
         
         function updateStatus(message, isConnected) {
@@ -720,9 +673,6 @@
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
             stopHeartbeat();
-            if (appState.qrRefreshInterval) {
-                clearInterval(appState.qrRefreshInterval);
-            }
             if (appState.reconnectTimeout) {
                 clearTimeout(appState.reconnectTimeout);
             }

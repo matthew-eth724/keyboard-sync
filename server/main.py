@@ -9,16 +9,33 @@ This is the foundation for M3: Encrypted transport implementation
 import asyncio
 import json
 import logging
+import os
+import secrets
 import ssl
-import asyncio
-from aiohttp import web, WSMsgType, web_protocol
-from aiohttp.web_protocol import WebProtocol
+import sys
+
+# Allow running this file directly (`python server/main.py`) as well as a
+# module (`python -m server.main`).
+if __package__ in (None, ""):
+    sys.path.insert(
+        0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+
+from aiohttp import web, WSMsgType
 
 from server.crypto import (
     generate_keypair, perform_handshake, seal_message, open_message,
     blake2b_hash, create_sealed_box, derive_shared_secret
 )
-from server.pairing import get_paired_devices, add_paired_device, remove_paired_device
+from server.pairing import (
+    paired_devices,
+    get_all_paired_devices,
+    revoke_device,
+    start_code_pairing,
+    complete_code_pairing,
+    PairingError,
+)
+from server.clipboard_api import set_clipboard
 from server.clipboard import (
     add_clipboard_item, get_clipboard_history, get_last_item,
     get_history_stats, add_connected_phone, remove_connected_phone,
@@ -37,6 +54,8 @@ RECONNECT_DELAY_BASE = 1.0
 # Global state for M3 - enhanced session management
 sessions = {}
 connection_states = {}
+active_connections = {}
+_event_loop = None
 
 
 
@@ -105,15 +124,38 @@ async def establish_session_reconnect(device_key, peer_pub_key, device_id):
     return send_box, recv_box, session_id
 
 
-async def setup_routes(app):
+def _web_path(filename):
+    """Return an absolute path inside the web/ directory, or None."""
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "web",
+        filename,
+    )
+    return path if os.path.exists(path) else None
+
+
+def setup_routes(app):
     """Setup application routes"""
     app.router.add_get('/ws', handle_websocket)
     app.router.add_get('/', serve_homepage)
     app.router.add_get('/health', health_check)
+    app.router.add_get('/crypto.js', serve_crypto_js)
+
+
+async def serve_crypto_js(request):
+    """Serve the browser-side crypto helper."""
+    path = _web_path('crypto.js')
+    if path is None:
+        return web.Response(status=404, text='crypto.js not found')
+    return web.FileResponse(path)
+
 
 
 async def serve_homepage(request):
     """Serve the phone UI homepage"""
+    index_path = _web_path('index.html')
+    if index_path:
+        return web.FileResponse(index_path)
     html_content = """
 <!DOCTYPE html>
 <html>
@@ -141,14 +183,9 @@ async def serve_homepage(request):
         
         <div id="pairing-section">
             <h2>Pair with PC</h2>
-            <p>Scan the QR code on your PC or enter the pairing code:</p>
+            <p>Enter the pairing code:</p>
             
-            <div id="qr-display">
-                <h3>QR Code</h3>
-                <img id="qr-image" src="/api/qr" alt="Pairing QR Code">
-            </div>
-            
-            <div id="code-display" style="display:none;">
+            <div id="code-display">
                 <h3>Pairing Code</h3>
                 <input type="text" id="pairing-code" readonly>
                 <button onclick="enterCodeManually()">Enter Code Manually</button>
@@ -225,9 +262,6 @@ async def serve_homepage(request):
         }
         
         function displayPairingInfo(data) {
-            if (data.qr_code) {
-                document.getElementById('qr-image').src = data.qr_code;
-            }
             if (data.code) {
                 document.getElementById('pairing-code').value = data.code;
                 document.getElementById('code-display').style.display = 'block';
@@ -280,30 +314,13 @@ async def health_check(request):
 async def init_app():
     """Initialize the application"""
     app = web.Application()
-    await setup_routes(app)
+    setup_routes(app)
     
     # Initialize with some test data
     logger.info("Initializing ClipSync server...")
     
     return app
 
-
-if __name__ == '__main__':
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='ClipSync Server')
-    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
-    parser.add_argument('--port', type=int, default=8000, help='Port to listen on')
-    
-    args = parser.parse_args()
-    
-    # Initialize and run server
-    app = web.Application()
-    web.run_app(app, host=args.host, port=args.port)
-
-
-# Keep backward compatibility
-app = None  # Will be initialized when needed
 
 # ============================================================================
 # M3: ENCRYPTED TRANSPORT IMPLEMENTATION - COMPREHENSIVE
@@ -457,11 +474,20 @@ async def handle_connection_drop(device_id, old_session_id):
     # Calculate backoff delay for connection recovery
     delay = 1.0 * (2 ** (reconnect_attempts[device_id] - 1))
     logger.info(f"Scheduling reconnection for device {device_id} in {delay}s")
-    
-    await asyncio.sleep(delay)
-    
-    # Re-establish session (M3 requirement: fresh session)
-    return await establish_session_reconnect(device_id)
+
+    # Attempt to re-establish a session from the stored device key.
+    device_key = paired_devices.get(device_id, {}).get('device_key')
+    if isinstance(device_key, str):
+        try:
+            device_key = bytes.fromhex(device_key)
+        except ValueError:
+            device_key = None
+
+    if not device_key:
+        logger.warning(f"No stored device key for {device_id}; skipping reconnect")
+        return None
+
+    return await establish_session_reconnect(device_key, None, device_id)
 
 async def monitor_connection_health(device_id, session_id):
     """
@@ -525,11 +551,10 @@ async def cleanup_expired_sessions():
     
     # Remove expired sessions
     for session_id in expired_sessions:
-        if session_id in m3_sessions:
-            del m3_sessions[session_id]
+        session_data = m3_sessions.pop(session_id, None)
+        device_id = (session_data or {}).get('device_id')
         
         # Clean up related connection health
-        device_id = m3_sessions.get(session_id, {}).get('device_id')
         if device_id and device_id in connection_health:
             del connection_health[device_id]
         
@@ -601,18 +626,42 @@ async def handle_websocket(request):
     Returns:
         WebSocket response with encrypted transport
     """
-    # Create secure WebSocket context with TLS/SSL (M3 requirement)
-    ssl_context = await create_secure_websocket_context()
-    ws = web.WebSocketResponse(ssl=ssl_context)
-    await ws.prepare(request, ssl_context=ssl_context)
+    # Plain WebSocket transport. TLS termination (wss://) is provided by a
+    # fronting proxy when configured; see create_secure_websocket_context.
+    ws = web.WebSocketResponse(heartbeat=HEARTBEAT_INTERVAL)
+    await ws.prepare(request)
     
     device_id = None
     session_data = None
-    
+
+    async def start_session(dev_id):
+        """Initialize crypto state and a fresh session for a device."""
+        device_key, session_keys = await init_crypto_for_device(dev_id)
+        send_box, recv_box, session_id = await establish_session_reconnect(
+            device_key, None, dev_id
+        )
+        active_connections[dev_id] = ws
+        add_connected_phone(dev_id)
+        return {
+            'device_key': device_key,
+            'session_keys': session_keys,
+            'send_box': send_box,
+            'recv_box': recv_box,
+            'session_id': session_id,
+            'device_id': dev_id,
+        }
+
     try:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
-                data = json.loads(msg.data)
+                try:
+                    data = json.loads(msg.data)
+                except (json.JSONDecodeError, TypeError):
+                    await ws.send_str(json.dumps({
+                        'type': 'error',
+                        'message': 'Invalid JSON payload'
+                    }))
+                    continue
                 msg_type = data.get('type')
                 
                 if msg_type == 'hello':
@@ -622,25 +671,57 @@ async def handle_websocket(request):
                     
                     # Check if device is paired
                     if device_id not in paired_devices:
+                        # Offer pairing material so the client can pair.
+                        code = start_code_pairing(device_id)
                         await ws.send_str(json.dumps({
-                            'type': 'error',
-                            'message': 'Device not paired'
+                            'type': 'pairing_info',
+                            'code': code
                         }))
-                        break
+                        continue
                     
                     # Initialize crypto for device with M3 security
-                    device_key, session_keys = await init_crypto_for_device(device_id)
-                    session_data = {
-                        'device_key': device_key,
-                        'session_keys': session_keys,
-                        'device_id': device_id
-                    }
+                    session_data = await start_session(device_id)
                     
                     await ws.send_str(json.dumps({
                         'type': 'ready',
                         'message': 'Crypto initialized'
                     }))
-                    
+                    await ws.send_str(json.dumps({
+                        'type': 'connected',
+                        'device_id': device_id,
+                        'status': 'connected'
+                    }))
+                    logger.info(f"Paired device connected: {device_id}")
+
+                elif msg_type == 'code_input':
+                    code = (data.get('code') or '').strip().upper()
+                    if not device_id:
+                        await ws.send_str(json.dumps({
+                            'type': 'error',
+                            'message': 'Send hello before a pairing code'
+                        }))
+                        continue
+                    try:
+                        complete_code_pairing(code, device_id)
+                    except PairingError as exc:
+                        await ws.send_str(json.dumps({
+                            'type': 'error',
+                            'message': f'Pairing failed: {exc}'
+                        }))
+                        continue
+                    except Exception as exc:
+                        await ws.send_str(json.dumps({
+                            'type': 'error',
+                            'message': f'Pairing failed: {exc}'
+                        }))
+                        continue
+                    session_data = await start_session(device_id)
+                    await ws.send_str(json.dumps({
+                        'type': 'connected',
+                        'device_id': device_id,
+                        'status': 'connected'
+                    }))
+
                 elif msg_type == 'encrypt':
                     # Encrypt message from phone to PC with M3 security
                     if not session_data:
@@ -650,13 +731,24 @@ async def handle_websocket(request):
                         }))
                         continue
                     
-                    payload = data.get('payload')
+                    payload = data.get('payload') or ''
                     encrypted = seal_message(session_data['send_box'], {
                         'type': 'phone_to_pc',
                         'payload': payload,
                         'device': device_id,
                         'ts': int(asyncio.get_event_loop().time() * 1000)
                     })
+                    
+                    # Apply the incoming text to the PC clipboard and history.
+                    if payload:
+                        try:
+                            set_clipboard(payload)
+                        except Exception as exc:
+                            logger.error(f"Failed to set PC clipboard: {exc}")
+                        try:
+                            add_clipboard_item(payload, device_id, source='phone')
+                        except Exception as exc:
+                            logger.error(f"Failed to store clipboard item: {exc}")
                     
                     # Relay encrypted message (M3 requirement)
                     await relay_encrypted_message(encrypted, device_id)
@@ -676,12 +768,19 @@ async def handle_websocket(request):
                         continue
                     
                     encrypted_data = data.get('encrypted')
-                    decrypted = open_message(session_data['recv_box'], encrypted_data)
-                    
-                    await ws.send_str(json.dumps({
-                        'type': 'decrypted',
-                        'message': decrypted
-                    }))
+                    try:
+                        if isinstance(encrypted_data, list):
+                            encrypted_data = bytes(encrypted_data)
+                        decrypted = open_message(session_data['recv_box'], encrypted_data)
+                        await ws.send_str(json.dumps({
+                            'type': 'decrypted',
+                            'message': decrypted
+                        }))
+                    except Exception as exc:
+                        await ws.send_str(json.dumps({
+                            'type': 'error',
+                            'message': f'Decryption failed: {exc}'
+                        }))
                     
                 elif msg_type == 'ping':
                     # Keep-alive message with M3 health monitoring
@@ -704,19 +803,26 @@ async def handle_websocket(request):
                         continue
                     
                     payload = data.get('content')
-                    device_id = data.get('device_id')
+                    src_device = data.get('device_id') or device_id
+                    
+                    if not payload:
+                        await ws.send_str(json.dumps({
+                            'type': 'error',
+                            'message': 'Missing clipboard content'
+                        }))
+                        continue
                     
                     # Add to clipboard history with deduplication
-                    if add_clipboard_item(payload, device_id, source='pc'):
-                        logger.info(f"[M4] Clipboard change from {device_id}: {payload[:50]}...")
+                    if add_clipboard_item(payload, src_device, source='pc'):
+                        logger.info(f"[M4] Clipboard change from {src_device}: {payload[:50]}...")
                         
                         # Push to all connected phones
-                        await relay_clipboard_change(payload, device_id)
+                        await relay_clipboard_change(payload, src_device)
                         
                         await ws.send_str(json.dumps({
                             'type': 'clipboard_synced',
                             'payload': payload,
-                            'device': device_id,
+                            'device': src_device,
                             'timestamp': int(asyncio.get_event_loop().time() * 1000)
                         }))
                     else:
@@ -735,16 +841,27 @@ async def handle_websocket(request):
                         continue
                     
                     payload = data.get('content')
-                    device_id = data.get('device_id')
+                    src_device = data.get('device_id') or device_id
                     
-                    # Add to clipboard history
-                    add_clipboard_item(payload, device_id, source='phone')
-                    logger.info(f"[M4] Clipboard from phone {device_id}: {payload[:50]}...")
+                    if not payload:
+                        await ws.send_str(json.dumps({
+                            'type': 'error',
+                            'message': 'Missing clipboard content'
+                        }))
+                        continue
+                    
+                    # Add to clipboard history and apply to the PC clipboard
+                    add_clipboard_item(payload, src_device, source='phone')
+                    logger.info(f"[M4] Clipboard from phone {src_device}: {payload[:50]}...")
+                    try:
+                        set_clipboard(payload)
+                    except Exception as exc:
+                        logger.error(f"Failed to set PC clipboard: {exc}")
                     
                     await ws.send_str(json.dumps({
                         'type': 'clipboard_received',
                         'status': 'ok',
-                        'device': device_id
+                        'device': src_device
                     }))
                     
                 elif msg_type == 'clipboard_request':
@@ -786,14 +903,50 @@ async def handle_websocket(request):
                 
     finally:
         logger.info(f"Phone device disconnected: {device_id}")
-        if device_id and device_id in active_connections:
-            del active_connections[device_id]
-            
-        # Initiate reconnection for M3 resilience
         if device_id:
-            await handle_connection_drop(device_id, session_data.get('session_id') if session_data else None)
+            active_connections.pop(device_id, None)
+            remove_connected_phone(device_id)
+            
+            # Initiate reconnection for M3 resilience
+            try:
+                await handle_connection_drop(
+                    device_id,
+                    session_data.get('session_id') if session_data else None
+                )
+            except Exception as exc:
+                logger.error(f"Reconnection handling failed for {device_id}: {exc}")
     
     return ws
+
+# ============================================================================
+# M3: ENCRYPTED MESSAGE RELAY
+# ============================================================================
+
+async def relay_encrypted_message(encrypted: bytes, source_device: str):
+    """
+    Relay an already-sealed message to every other connected device.
+
+    The ciphertext is passed through unchanged; only holders of the session
+    key can open it.
+
+    Args:
+        encrypted: Sealed ciphertext produced by seal_message
+        source_device: Device that produced the message
+    """
+    payload = encrypted.hex() if isinstance(encrypted, (bytes, bytearray)) else encrypted
+    
+    for device_id, conn in list(active_connections.items()):
+        if device_id == source_device:
+            continue
+        try:
+            await conn.send_str(json.dumps({
+                'type': 'broadcast',
+                'from': source_device,
+                'encrypted': payload,
+                'timestamp': int(asyncio.get_event_loop().time() * 1000)
+            }))
+        except Exception as e:
+            logger.error(f"Failed to relay encrypted message to {device_id}: {e}")
 
 # ============================================================================
 # M4: CLIPBOARD LOGIC INTEGRATION
@@ -873,3 +1026,69 @@ async def get_session_stats():
         'session_timeout': SESSION_TIMEOUT,
         'max_reconnect_attempts': MAX_RECONNECT_ATTEMPTS
     }
+
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
+
+def main(argv=None):
+    """Build the application, start clipboard polling, and run the server."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='ClipSync Server')
+    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
+    parser.add_argument('--port', type=int, default=8000, help='Port to listen on')
+    args = parser.parse_args(argv)
+
+    application = web.Application()
+    setup_routes(application)
+
+    async def _on_startup(app):
+        global _event_loop
+        _event_loop = asyncio.get_running_loop()
+        logger.info("Initializing ClipSync server...")
+        try:
+            from server.polling import start_clipboard_polling
+
+            app['clipboard_poller'] = start_clipboard_polling(
+                interval=0.5,
+                device_id='pc',
+                callback=_broadcast_local_clipboard,
+            )
+        except Exception as exc:
+            logger.warning(f"Clipboard polling unavailable: {exc}")
+
+    async def _on_cleanup(app):
+        poller = app.get('clipboard_poller')
+        if poller:
+            poller.stop()
+
+    application.on_startup.append(_on_startup)
+    application.on_cleanup.append(_on_cleanup)
+
+    logger.info(f"Starting ClipSync server on {args.host}:{args.port}")
+    web.run_app(application, host=args.host, port=args.port)
+
+
+def _broadcast_local_clipboard(content):
+    """Schedule a broadcast of a local PC clipboard change to all phones.
+
+    Called from the clipboard poller's worker thread, so the coroutine must be
+    handed back to the server's event loop explicitly.
+    """
+    loop = _event_loop
+    if loop is None or loop.is_closed():
+        logger.warning("Event loop unavailable; dropping clipboard broadcast")
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(
+            relay_clipboard_change(content, 'pc'), loop
+        )
+    except Exception as exc:
+        logger.error(f"Could not broadcast clipboard change: {exc}")
+
+
+if __name__ == '__main__':
+    main()
+
